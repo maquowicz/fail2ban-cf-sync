@@ -46,7 +46,7 @@ Custom Fail2Ban integration with Cloudflare WAF Rules lists (free). Bans from ja
 ## Project Structure
 - **scripts_new/** (new version):
   - entryPoint.py: Venv creation/install (requests, tenacity), runs cloudflare_sync.py.
-  - cloudflare_sync.py: Core—normalize_ip (IPv6 /64), query_active_bans (SQLite), api_add/del/get_all_items (CF API with retry/tenacity, pagination, bulk_add/bulk_delete for efficient batch operations, caching in cf_items_cache.json for repeated list fetches), actions (ban/del/start/stop/flush_cf/flush_cache/local_info/compare). Optimized for startup sync (bulk), ban restore (no DB check), stop bulk clear (flushes all from CF), manual ops (DB query, diff). Includes safe_json for handling invalid API responses (prevents crashes on auth errors).
+  - cloudflare_sync.py: Core—normalize_ip (IPv6 /64), query_active_bans (SQLite), api_add/del/get_all_items (CF API with retry/tenacity, improved pagination using cursors.after and total_count validation, bulk_add/bulk_delete for efficient batch operations, caching in cf_items_cache.json for repeated list fetches), actions (ban/del/start/stop/flush_cf/flush_cache/local_info/compare). Optimized for startup sync (bulk), ban restore (no DB check), stop bulk clear (flushes all from CF), manual ops (DB query, diff). Includes safe_json for handling invalid API responses (prevents crashes on auth errors). Reduced verbose raw API debug logs; errors now log raw response snippets at ERROR level.
   - cloudflare_auth.sh: Exports CF_TOKEN/ACCOUNT_ID/LIST_ID, LOG_LEVEL=INFO, ENABLE_START_SYNC=true, CF_CACHE_TTL=3600 (cache TTL in seconds), etc. (hardcoded; source in actions).
 
 - **action.d/**:
@@ -74,9 +74,9 @@ Custom Fail2Ban integration with Cloudflare WAF Rules lists (free). Bans from ja
 - Start Sync: Optional resync on Fail2Ban start (ENABLE_START_SYNC=true); uses bulk ops for speed.
 - Stop Clear: Bulk flushes all from CF on Fail2Ban stop (actionstop).
 - Bulk Operations: bulk_add/bulk_delete handle up to 1000 items per API call to avoid timeouts/delays.
-- Caching: api_get_all_items caches `{ip: id}` in cf_items_cache.json (TTL via CF_CACHE_TTL=3600s); invalidated after modifications (add/del/bulk ops) for consistency; reduces repeated fetches. Manual flush_cache clears it.
+- Caching: api_get_all_items caches `{ip: id}` in cf_items_cache.json (TTL via CF_CACHE_TTL=3600s); invalidated after modifications (add/del/bulk ops) for consistency; reduces repeated fetches. Improved pagination fetches all items with cursor-based looping, total_count tracking (warns on incomplete fetches), and batch debugging. Manual flush_cache clears it.
 - Manual Actions: flush_cf (bulk clear CF, invalidates cache), local_info (query DB: total/count/list IPs/query IP), compare (diff local vs CF, always invalidates cache for fresh fetch).
-- Error Handling: safe_json parses API responses safely, logs raw text on invalid JSON (e.g., auth failures). All API calls log full raw response (status + body) at DEBUG level for debugging errors/warnings.
+- Error Handling: safe_json parses API responses safely, logs raw text on invalid JSON (e.g., auth failures). Reduced raw API response logging to avoid noise (removed from auth test, safe_json, bulk ops, GET); bulk add/delete errors now log raw response snippets at ERROR level for better diagnostics.
 
 ## Troubleshooting
 - Script fail: Check venv (python3-venv), `chmod +x`, logs.
@@ -90,7 +90,8 @@ Custom Fail2Ban integration with Cloudflare WAF Rules lists (free). Bans from ja
 - Stop delays: Cache invalidated post-mod; next fetch gets fresh data; check cf_items_cache.json (remove if stale).
 - Cache issues: Set CF_CACHE_TTL shorter; LOG_LEVEL=DEBUG for details.
 - "'str' object has no attribute 'get'": Fixed with safe_json; check logs for raw API errors (likely invalid token).
-- Debug: LOG_LEVEL=DEBUG, `tail /var/log/fail2ban-cloudflare-list.log`. Raw API responses logged for all calls, especially errors.
+- Pagination issues: If incomplete fetch (fewer items than total_count), check rate limits, network, or API changes; use DEBUG for batch/params logs.
+- Debug: LOG_LEVEL=DEBUG, `tail /var/log/fail2ban-cloudflare-list.log`. Raw API responses logged selectively (errors at ERROR, reduced debug noise).
 
 ## References
 - Fail2Ban: https://www.fail2ban.org/wiki/
