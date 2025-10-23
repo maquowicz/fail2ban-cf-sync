@@ -72,13 +72,10 @@ try:
     if ENABLE_AUTH_TEST:
         test_url = f"{BASE_URL}/accounts/{CF_ACCOUNT_ID}"
         resp = requests.get(test_url, headers=headers)
-        logger.debug(f"Raw API response for GET {test_url}: status={resp.status_code}, body={resp.text}")
         if resp.status_code != 200:
             logger.error(f"Auth failed: {resp.status_code} - {resp.text[:200]}. Check credentials and scopes (Account.Rules:Edit + Read for WAF lists).")
             sys.exit(1)
         logger.debug("Auth test passed")
-    else:
-        logger.info("Skipping auth test")
 except requests.exceptions.RequestException as e:
     logger.error(f"Network error during auth test: {e}")
     sys.exit(1)
@@ -87,7 +84,6 @@ logger.debug("Requests session initialized successfully (using WAF Rules Lists A
 
 def safe_json(resp):
     """Safely parse JSON response, ensure dict; return error dict if not."""
-    logger.debug(f"Raw API response in safe_json (status: {resp.status_code}): body={resp.text}")
     try:
         parsed = resp.json()
         if isinstance(parsed, dict):
@@ -105,7 +101,6 @@ def normalize_ip(ip_str: str) -> str:
     try:
         ip = ipaddress.ip_address(ip_str)
         if ip.version == 6:
-            # Mimic old script: truncate to /64
             first_64_bits = ':'.join(str(ip).split(':')[:4]) + '::/64'
             return first_64_bits
         else:
@@ -132,7 +127,6 @@ def bulk_add(to_add: list):
         payload.append(entry)
     url = f"{BASE_URL}/accounts/{CF_ACCOUNT_ID}/rules/lists/{CF_LIST_ID}/items"
     resp = requests.post(url, headers=headers, json=payload)
-    logger.debug(f"Raw API response for POST {url}: status={resp.status_code}, body={resp.text}")
     if resp.status_code == 429:
         retry_after = int(resp.headers.get('retry-after', 60))
         logger.warning(f"Rate limited (429). Backing off for {retry_after}s")
@@ -163,7 +157,7 @@ def bulk_add(to_add: list):
     else:
         logger.warning(f"Unexpected errors type: {type(errors)} - {errors}")
     if not data.get('success', False):
-        logger.debug(f"Raw API response on bulk add failure: status={resp.status_code}, body={resp.text}")
+        logger.error(f"Bulk add failed (status: {resp.status_code}): {data}. Raw response: {resp.text[:500]}")
         raise requests.exceptions.RequestException(f"Bulk add failed: {data}")
 
 @retry(stop=stop_after_attempt(RETRY_COUNT), wait=wait_exponential(multiplier=1, min=1, max=10), retry=retry_if_exception_type((requests.exceptions.RequestException,)))
@@ -179,7 +173,6 @@ def bulk_delete(item_ids: list):
     payload = {"items": [{"id": item_id} for item_id in item_ids]}
     url = f"{BASE_URL}/accounts/{CF_ACCOUNT_ID}/rules/lists/{CF_LIST_ID}/items"
     resp = requests.delete(url, headers=headers, json=payload)
-    logger.debug(f"Raw API response for DELETE {url}: status={resp.status_code}, body={resp.text}")
     if resp.status_code == 429:
         retry_after = int(resp.headers.get('retry-after', 60))
         logger.warning(f"Rate limited (429). Backing off for {retry_after}s")
@@ -209,7 +202,7 @@ def bulk_delete(item_ids: list):
     else:
         logger.warning(f"Unexpected errors type: {type(errors)} - {errors}")
     if not data.get('success', False):
-        logger.debug(f"Raw API response on bulk delete failure: status={resp.status_code}, body={resp.text}")
+        logger.error(f"Bulk delete failed (status: {resp.status_code}): {data}. Raw response: {resp.text[:500]}")
         raise requests.exceptions.RequestException(f"Bulk delete failed: {data}")
 
 
@@ -237,14 +230,16 @@ def api_get_all_items() -> dict:
     url = f"{BASE_URL}/accounts/{CF_ACCOUNT_ID}/rules/lists/{CF_LIST_ID}/items"
     per_page = 500
     cursor = None
+    total_fetched = 0
+    expected_total = None
     while True:
         params = {'per_page': per_page}
         if cursor:
             params['cursor'] = cursor
+        logger.debug(f"Sending GET params: {params}")
         resp = requests.get(url, headers=headers, params=params)
-        logger.debug(f"Raw API response for GET {url} (cursor: {cursor or 'initial'}): status={resp.status_code}, body={resp.text}")
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get('retry-after', 60))
+            retry_after = int(resp.headers.get('Retry-After', 60))
             logger.warning(f"Rate limited (429) on GET. Backing off for {retry_after}s")
             time.sleep(retry_after)
             raise requests.exceptions.HTTPError(f"Rate limited: {resp.text}")
@@ -270,14 +265,19 @@ def api_get_all_items() -> dict:
                     logger.warning(f"Skipping non-dict item in result: {item}")
         else:
             logger.warning(f"Unexpected result type: {type(result_list)} - {result_list}")
+        total_fetched += len(result_list)
         if not result_list:
+            logger.debug("Empty result list; breaking")
             break
-        logger.debug(f"Fetched batch (cursor: {cursor or 'initial'}): {len(result_list)} items")
+        logger.debug(f"Fetched batch (cursor: {cursor or 'initial'}): {len(result_list)} items (total so far: {total_fetched})")
         
         # Get next cursor
-        result_info = data.get('result_info', {}) or data.get('meta', {})
-        cursor = result_info.get('cursor')
+        result_info = data.get('result_info', {})
+        expected_total = result_info.get('total_count', expected_total)
+        cursors = result_info.get('cursors', {})
+        cursor = cursors.get('after') if cursors else None
         if not cursor:
+            logger.debug("No cursor; ending pagination")
             break
     
     # Cache the result
@@ -288,7 +288,11 @@ def api_get_all_items() -> dict:
     except OSError as e:
         logger.warning(f"Failed to cache CF items: {e}")
     
-    logger.info(f"Total items in WAF Rules list: {len(items)}")
+    logger.info(f"Total items fetched from WAF Rules list: {len(items)}")
+    if expected_total and len(items) < expected_total:
+        logger.warning(f"Incomplete fetch: got {len(items)}, but total_count={expected_total}. Check logs for pagination issues.")
+    elif expected_total:
+        logger.debug(f"Full fetch confirmed: {len(items)} matches total_count={expected_total}")
     return items
 
 def save_cache(items: dict):
