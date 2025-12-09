@@ -12,7 +12,7 @@ import ipaddress
 import time
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Ensure log directory exists
@@ -323,7 +323,7 @@ def query_active_bans(jail: str = None) -> dict:
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        now = datetime.utcnow().timestamp()
+        now = datetime.now(timezone.utc).timestamp()
         if jail:
             query = "SELECT ip, jail, bantime, timeofban FROM bips WHERE jail = ? AND (bantime <= -1 OR (timeofban + bantime) > ?)"
             rows = conn.execute(query, (jail, now)).fetchall()
