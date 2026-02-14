@@ -101,8 +101,8 @@ def normalize_ip(ip_str: str) -> str:
     try:
         ip = ipaddress.ip_address(ip_str)
         if ip.version == 6:
-            first_64_bits = ':'.join(str(ip).split(':')[:4]) + '::/64'
-            return first_64_bits
+            net = ipaddress.IPv6Network(f"{ip_str}/64", strict=False)
+            return str(net)
         else:
             return str(ip)  # No /32 for IPv4; CF stores plain IP
     except ValueError:
@@ -144,14 +144,15 @@ def bulk_add(to_add: list):
         for error in errors:
             if isinstance(error, dict):
                 code = error.get('code')
-                target = error.get('target', {})
-                ip_idx = target.get('ip', {}).get('index', 0) if isinstance(target, dict) else 0
+                ip_idx = error.get('source', {}).get('parameter_value_index', 0)
                 if ip_idx < len(to_add):
                     ip_cidr = to_add[ip_idx][0]
                     if code == 'ip_already_exist' or resp.status_code == 409:
                         logger.info(f"IP {ip_cidr} already exists; skipping")
                     else:
-                        logger.warning(f"Bulk add partial fail for {ip_cidr} (code: {code})")
+                        logger.error(f"Invalid IP at pos {ip_idx}: '{ip_cidr}' (code: {code})")
+                else:
+                    logger.warning(f"Error index {ip_idx} out of range (len: {len(to_add)})")
             else:
                 logger.warning(f"Skipping non-dict error: {error}")
     else:
@@ -330,7 +331,13 @@ def query_active_bans(jail: str = None) -> dict:
         else:
             query = "SELECT ip, jail, bantime, timeofban FROM bips WHERE (bantime <= -1 OR (timeofban + bantime) > ?)"
             rows = conn.execute(query, (now,)).fetchall()
-        bans = {row['ip']: dict(row) for row in rows}
+        bans = {}
+        for row in rows:
+            try:
+                ipaddress.ip_address(row['ip'])
+                bans[row['ip']] = dict(row)
+            except ValueError:
+                logger.warning(f"Skipping invalid DB IP: '{row['ip']}' (jail: {row['jail']})")
         logger.debug(f"Active bans for '{jail or 'all'}': {len(bans)}")
         return bans
     except sqlite3.Error as e:
